@@ -281,7 +281,7 @@ export default function MandelAIPlatformV3() {
               <Database className="w-5 h-5 text-white" />
             </div>
             <span className="text-xl font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-white to-cyan-400">
-              MANDEL.AI <span className="text-xs font-normal text-cyan-500/50">v3.0</span>
+              LOTTO-MATH.AI <span className="text-xs font-normal text-cyan-500/50">v3.0</span>
             </span>
           </div>
           
