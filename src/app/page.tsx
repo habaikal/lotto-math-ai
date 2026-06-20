@@ -46,7 +46,7 @@ interface BacktestStats {
   };
 }
 
-export default function MandelAIPlatformV3() {
+export default function LottoMathPlatformV3() {
   // --- [State 관리] ---
   const [selectedNumbers, setSelectedNumbers] = useState<number[]>([]);
   const [budget, setBudget] = useState<number>(50000);
@@ -219,7 +219,7 @@ export default function MandelAIPlatformV3() {
     if (generatedCombinations.length === 0) return;
     
     const nextDraw = latestDrawNo + 1;
-    let content = `[제${nextDraw}회차] MandelAI 조합 결과\n\n`;
+    let content = `[제${nextDraw}회차] LOTTO-MATH 조합 결과\n\n`;
     content += "게임,번호1,번호2,번호3,번호4,번호5,번호6\n";
     generatedCombinations.forEach((combo, idx) => {
       content += `${idx + 1},${combo.join(',')}\n`;
@@ -230,7 +230,7 @@ export default function MandelAIPlatformV3() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `MandelAI_제${nextDraw}회차_조합결과.csv`);
+    link.setAttribute('download', `LOTTO-MATH_제${nextDraw}회차_조합결과.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -247,7 +247,7 @@ export default function MandelAIPlatformV3() {
       setIsSending(false);
       setSendSuccess(true);
       
-      const textContent = `[제${nextDraw}회차] MandelAI 추천 조합\n\n` + 
+      const textContent = `[제${nextDraw}회차] LOTTO-MATH 추천 조합\n\n` + 
         generatedCombinations.map((c, i) => `[${i+1}게임] ${c.join(', ')}`).join('\n');
       
       const textArea = document.createElement("textarea");
