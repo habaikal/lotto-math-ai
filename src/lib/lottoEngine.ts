@@ -30,38 +30,70 @@ export interface BacktestResult {
 // CSV 파일 경로 (Next.js server-side 기준 public 폴더 내)
 const CSV_PATH = path.join(process.cwd(), 'public', 'data', 'lotto_results.csv');
 
-/**
- * 1. 로컬 CSV 파일 로드 및 파싱 (백엔드 전용)
- */
+let cachedHistory: LottoDraw[] | null = null;
+let cachedStatsModel: StatsModel | null = null;
+let cachedCsvMtime = 0;
+
+function getCsvModifiedTime(): number {
+  try {
+    const stats = fs.statSync(CSV_PATH);
+    return stats.mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function parseLottoCsv(csvText: string): LottoDraw[] {
+  const rows = csvText
+    .replace(/\r\n/g, '\n')
+    .trim()
+    .split('\n')
+    .filter(row => row.trim().length > 0);
+
+  if (rows.length > 0 && rows[0].startsWith('회차')) {
+    rows.shift();
+  }
+
+  const parsedData = rows.map((row) => {
+    const cols = row.split(',').map(val => parseInt(val.trim(), 10));
+    const nums = cols.filter(n => !Number.isNaN(n));
+
+    if (nums.length >= 8) {
+      return {
+        drawNo: nums[0],
+        numbers: nums.slice(1, 7).sort((a, b) => a - b),
+        bonus: nums[7]
+      };
+    }
+    return null;
+  }).filter((item): item is LottoDraw => item !== null);
+
+  return parsedData.sort((a, b) => b.drawNo - a.drawNo);
+}
+
 export function loadLottoHistory(): LottoDraw[] {
   try {
+    const mtime = getCsvModifiedTime();
+    if (cachedHistory && mtime === cachedCsvMtime) {
+      return cachedHistory;
+    }
+
     if (!fs.existsSync(CSV_PATH)) {
       throw new Error(`CSV 파일을 찾을 수 없습니다: ${CSV_PATH}`);
     }
 
     const csvText = fs.readFileSync(CSV_PATH, 'utf-8');
-    const rows = csvText.split('\n').filter(row => row.trim() !== '');
+    cachedHistory = parseLottoCsv(csvText);
+    cachedCsvMtime = mtime;
+    cachedStatsModel = null;
 
-    const parsedData = rows.map((row) => {
-      const cols = row.split(',').map(val => parseInt(val.trim()));
-      const nums = cols.filter(n => !isNaN(n));
-      
-      // 회차 번호를 포함하여 총 8개 컬럼(회차 + 6개 번호 + 1개 보너스)이 정상 파싱되어야 함
-      if (nums.length >= 8) {
-        return {
-          drawNo: nums[0],
-          numbers: nums.slice(1, 7).sort((a, b) => a - b),
-          bonus: nums[7]
-        };
-      }
-      return null;
-    }).filter((item): item is LottoDraw => item !== null);
-
-    // 회차 기준 내림차순 정렬 (최신 회차가 처음으로 오도록)
-    return parsedData.sort((a, b) => b.drawNo - a.drawNo);
+    return cachedHistory;
   } catch (error) {
     console.error('CSV 데이터 파싱 실패, 가상 데이터 생성 모드로 전환합니다:', error);
-    return generateMockHistory();
+    cachedHistory = generateMockHistory();
+    cachedCsvMtime = 0;
+    cachedStatsModel = null;
+    return cachedHistory;
   }
 }
 
@@ -93,6 +125,10 @@ function generateMockHistory(): LottoDraw[] {
  * 2. 통계 모델 빌드 (번호별 당첨 빈도 누적치 계산)
  */
 export function buildStatisticalModel(data: LottoDraw[]): StatsModel {
+  if (cachedStatsModel) {
+    return cachedStatsModel;
+  }
+
   const frequency = Array(46).fill(0);
   data.forEach(draw => {
     draw.numbers.forEach(num => {
@@ -101,54 +137,115 @@ export function buildStatisticalModel(data: LottoDraw[]): StatsModel {
       }
     });
   });
-  return { frequency };
+
+  cachedStatsModel = { frequency };
+  return cachedStatsModel;
 }
 
 /**
  * 3. AI 최적 타겟 15수 추출 알고리즘 (백엔드 은닉 완료)
  * - 최근 빈도수 기반 Hot 10수, Cold 10수 풀 생성
- * - 기댓값 최적화를 위한 15수 조합 연산
+ * - 단기 모멘텀 옵션 적용 시 최근 20회차 출현 번호에 높은 가중치를 주어 최근 기계 컨디션 반영
  */
-export function recommendNumbers(statsModel: StatsModel): number[] {
+export function recommendNumbers(
+  statsModel: StatsModel, 
+  historicalData: LottoDraw[], 
+  useMomentum: boolean = false
+): number[] {
   const { frequency } = statsModel;
-  
-  // 1~45번 빈도 맵핑 후 정렬
-  const freqMap = frequency
-    .map((freq, num) => ({ num, freq }))
-    .slice(1); // 0번 인덱스 제외
-  
-  // 빈도가 높은 순 정렬
-  freqMap.sort((a, b) => b.freq - a.freq);
+  let hotPool: number[] = [];
+  let coldPool: number[] = [];
 
-  const hotPool = freqMap.slice(0, 10).map(i => i.num);
-  const coldPool = freqMap.slice(-10).map(i => i.num);
+  if (useMomentum && historicalData.length > 0) {
+    // 1) 최근 20회차 데이터 슬라이스
+    const recent20 = historicalData.slice(0, 20);
+    const recentFreq = Array(46).fill(0);
+    
+    recent20.forEach(draw => {
+      draw.numbers.forEach(num => {
+        if (num >= 1 && num <= 45) recentFreq[num]++;
+      });
+    });
 
-  const newSelection = new Set<number>();
+    // 2) 단기 모멘텀 가중 점수 계산 (누적 빈도 + 최근 20회차 빈도 * 10)
+    const scoreMap = frequency.map((freq, num) => {
+      if (num === 0) return { num, score: -1 };
+      const score = freq + (recentFreq[num] * 10);
+      return { num, score };
+    }).slice(1);
 
-  // Hot pool에서 5개 번호 무작위 선택
-  while (newSelection.size < 5 && hotPool.length > 0) {
-    const rIdx = Math.floor(Math.random() * hotPool.length);
-    newSelection.add(hotPool[rIdx]);
+    // 3) 점수 기준 내림차순 정렬
+    scoreMap.sort((a, b) => b.score - a.score);
+    hotPool = scoreMap.slice(0, 10).map(i => i.num);
+    coldPool = scoreMap.slice(-10).map(i => i.num);
+  } else {
+    // 기본 모드: 누적 빈도 기준 정렬
+    const freqMap = frequency
+      .map((freq, num) => ({ num, freq }))
+      .slice(1)
+      .sort((a, b) => b.freq - a.freq);
+
+    hotPool = freqMap.slice(0, 10).map(i => i.num);
+    coldPool = freqMap.slice(-10).map(i => i.num);
   }
 
-  // Cold pool에서 5개 번호 무작위 선택
-  while (newSelection.size < 10 && coldPool.length > 0) {
-    const rIdx = Math.floor(Math.random() * coldPool.length);
-    newSelection.add(coldPool[rIdx]);
+  const coreNumbers = new Set<number>();
+
+  // Hot pool에서 상위 5개 추출
+  for (let i = 0; i < 5 && i < hotPool.length; i++) {
+    coreNumbers.add(hotPool[i]);
+  }
+  // Cold pool에서 하위 5개 추출
+  for (let i = 0; i < 5 && i < coldPool.length; i++) {
+    coreNumbers.add(coldPool[i]);
   }
 
-  // 나머지 5개 번호는 1~45 중 완전 무작위 선택하여 분산 보정
-  while (newSelection.size < 15) {
-    const r = Math.floor(Math.random() * 45) + 1;
-    newSelection.add(r);
+  // 나머지 5개는 1~45 중 겹치지 않게 무작위 추출
+  const remainingPool = Array.from({ length: 45 }, (_, index) => index + 1).filter(
+    num => !coreNumbers.has(num)
+  );
+
+  while (coreNumbers.size < 15 && remainingPool.length > 0) {
+    const randomIndex = Math.floor(Math.random() * remainingPool.length);
+    coreNumbers.add(remainingPool.splice(randomIndex, 1)[0]);
   }
 
-  return Array.from(newSelection).sort((a, b) => a - b);
+  return Array.from(coreNumbers).sort((a, b) => a - b);
+}
+
+function getCombinations<T>(source: T[], size: number): T[][] {
+  const result: T[][] = [];
+  const combination: T[] = [];
+
+  function backtrack(start: number) {
+    if (combination.length === size) {
+      result.push([...combination]);
+      return;
+    }
+
+    for (let i = start; i <= source.length - (size - combination.length); i++) {
+      combination.push(source[i]);
+      backtrack(i + 1);
+      combination.pop();
+    }
+  }
+
+  backtrack(0);
+  return result;
+}
+
+function shuffleArray<T>(array: T[]): T[] {
+  const result = [...array];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
 }
 
 /**
  * 4. 다이내믹 커버링 조합 생성기 (백엔드 은닉 완료)
- * - 15개 번호 풀에서 무작위 6개 번호를 선택하여 중복 없이 지정된 게임 수만큼 조합 생성
+ * - 15개 번호 풀에서 조합을 효율적으로 생성하여 서버 부담 감소
  */
 export function generateCombinations(selectedNumbers: number[], budget: number): number[][] {
   const gamesCount = Math.floor(budget / 1000);
@@ -156,28 +253,14 @@ export function generateCombinations(selectedNumbers: number[], budget: number):
     return [];
   }
 
-  const result: number[][] = [];
-  const usedCombinations = new Set<string>();
+  const combinations = getCombinations(selectedNumbers, 6);
+  const targetCount = Math.min(gamesCount, combinations.length);
 
-  // 수학적 최대 조합 수: C(15, 6) = 5005
-  const targetCount = Math.min(gamesCount, 5005);
-  let safetyCounter = 0; // 무한 루프 방지 장치
-
-  while (result.length < targetCount && safetyCounter < 50000) {
-    safetyCounter++;
-
-    // 15개 중 6개 번호 셔플 선택
-    const shuffled = [...selectedNumbers].sort(() => 0.5 - Math.random());
-    const combo = shuffled.slice(0, 6).sort((a, b) => a - b);
-
-    const comboKey = combo.join(',');
-    if (!usedCombinations.has(comboKey)) {
-      usedCombinations.add(comboKey);
-      result.push(combo);
-    }
+  if (targetCount === combinations.length) {
+    return combinations;
   }
 
-  return result;
+  return shuffleArray(combinations).slice(0, targetCount);
 }
 
 /**

@@ -15,3 +15,7 @@ coverage/
 /.vscode
 /.turbo
 /.parcel-cache
+.vercel
+.env*
+Vercel Token(lotto-math).txt
+

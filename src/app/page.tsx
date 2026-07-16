@@ -1,11 +1,33 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   Cpu, Target, TrendingUp, Users, ShieldCheck, Zap, 
   RefreshCw, Lock, Database, History, 
   CheckCircle2, AlertTriangle, X, Download, Send, FileText
 } from 'lucide-react';
+
+interface NumberButtonProps {
+  num: number;
+  isSelected: boolean;
+  onToggle: (num: number) => void;
+}
+
+const NumberButton = React.memo(({ num, isSelected, onToggle }: NumberButtonProps) => (
+  <button
+    key={num}
+    id={`lotto-num-${num}`}
+    onClick={() => onToggle(num)}
+    className={`
+      relative aspect-square rounded-lg flex items-center justify-center text-sm md:text-base font-bold transition-all duration-300
+      ${isSelected 
+        ? 'bg-gradient-to-br from-cyan-400 to-blue-600 text-white shadow-[0_0_15px_rgba(34,211,238,0.6)] scale-105 z-10 border-none' 
+        : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white border border-white/5'}
+    `}
+  >
+    {num}
+  </button>
+), (prev, next) => prev.num === next.num && prev.isSelected === next.isSelected);
 
 // --- [공통 UI 컴포넌트: 글래스모피즘 카드] ---
 interface GlassCardProps {
@@ -53,6 +75,9 @@ export default function LottoMathPlatformV3() {
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   
+  // 단기 모멘텀 가중치 옵션 활성화 상태
+  const [useMomentum, setUseMomentum] = useState<boolean>(false);
+
   // 데이터 로드 상태 관리
   const [statsData, setStatsData] = useState<{ frequency: number[]; recentDraws: LottoDraw[] } | null>(null);
   const [latestDrawNo, setLatestDrawNo] = useState<number>(0);
@@ -71,12 +96,16 @@ export default function LottoMathPlatformV3() {
 
   // --- [1. API 연동: 초기 통계 및 최신 회차 데이터 호출] ---
   useEffect(() => {
+    const abortController = new AbortController();
+
     const fetchStats = async () => {
       try {
         setDataStatus({ loading: true, error: false, message: '' });
-        
-        const response = await fetch('/api/stats');
+
+        const response = await fetch('/api/stats', { signal: abortController.signal });
         const data = await response.json();
+
+        if (abortController.signal.aborted) return;
 
         if (data.success) {
           setLatestDrawNo(data.latestDrawNo);
@@ -89,6 +118,7 @@ export default function LottoMathPlatformV3() {
           throw new Error(data.error || '데이터 통계 로드 실패');
         }
       } catch (error: any) {
+        if (abortController.signal.aborted) return;
         console.error('초기 데이터 로딩 에러:', error);
         setDataStatus({ 
           loading: false, 
@@ -99,6 +129,7 @@ export default function LottoMathPlatformV3() {
     };
 
     fetchStats();
+    return () => abortController.abort();
   }, []);
 
   // --- [2. API 연동: 15수 변경 시 자동 백테스팅 구동] ---
@@ -140,7 +171,9 @@ export default function LottoMathPlatformV3() {
       setSelectedNumbers([]);
 
       const response = await fetch('/api/recommend', {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ useMomentum })
       });
       const data = await response.json();
 
@@ -157,19 +190,27 @@ export default function LottoMathPlatformV3() {
     }
   };
 
+  const numberList = useMemo(() => Array.from({ length: 45 }, (_, i) => i + 1), []);
+
   // 번호 개별 선택 기능 (최대 15수 제한)
-  const toggleNumber = (num: number) => {
-    if (selectedNumbers.includes(num)) {
-      setSelectedNumbers(selectedNumbers.filter(n => n !== num));
-    } else if (selectedNumbers.length < 15) {
-      setSelectedNumbers([...selectedNumbers, num].sort((a, b) => a - b));
-    }
-  };
+  const toggleNumber = useCallback((num: number) => {
+    setSelectedNumbers((prev) => {
+      if (prev.includes(num)) {
+        return prev.filter((n) => n !== num);
+      }
+
+      if (prev.length >= 15) {
+        return prev;
+      }
+
+      return [...prev, num].sort((a, b) => a - b);
+    });
+  }, []);
 
   // --- [4. API 연동: 수학적 커버링 조합 생성 호출] ---
-  const handleGenerateCombinations = async () => {
+  const handleGenerateCombinations = useCallback(async () => {
     if (selectedNumbers.length < 15) return;
-    
+
     try {
       setShowModal(true);
       setIsGenerating(true);
@@ -193,7 +234,55 @@ export default function LottoMathPlatformV3() {
     } finally {
       setIsGenerating(false);
     }
-  };
+  }, [selectedNumbers, budget]);
+
+  const handleDownload = useCallback(() => {
+    if (generatedCombinations.length === 0) return;
+
+    const nextDraw = latestDrawNo + 1;
+    let content = `[제${nextDraw}회차] LOTTO-MATH 조합 결과\n\n`;
+    content += "게임,번호1,번호2,번호3,번호4,번호5,번호6\n";
+    generatedCombinations.forEach((combo, idx) => {
+      content += `${idx + 1},${combo.join(',')}\n`;
+    });
+
+    const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), content], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `LOTTO-MATH_제${nextDraw}회차_조합결과.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [generatedCombinations, latestDrawNo]);
+
+  const handleSend = useCallback(() => {
+    if (generatedCombinations.length === 0) return;
+    setIsSending(true);
+
+    const nextDraw = latestDrawNo + 1;
+
+    setTimeout(() => {
+      setIsSending(false);
+      setSendSuccess(true);
+
+      const textContent = `[제${nextDraw}회차] LOTTO-MATH 추천 조합\n\n` + 
+        generatedCombinations.map((c, i) => `[${i+1}게임] ${c.join(', ')}`).join('\n');
+
+      const textArea = document.createElement('textarea');
+      textArea.value = textContent;
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+      } catch (err) {
+        console.warn('클립보드 복사 실패', err);
+      }
+      document.body.removeChild(textArea);
+
+      setTimeout(() => setSendSuccess(false), 3000);
+    }, 1000);
+  }, [generatedCombinations, latestDrawNo]);
 
   // --- [예산 대비 게임 수 & 실시간 보장률 시뮬레이션 (클라이언트 UX)] ---
   const gamesCount = Math.floor(budget / 1000);
@@ -213,58 +302,6 @@ export default function LottoMathPlatformV3() {
     }
     return { g3: g3.toFixed(1), g4: g4.toFixed(1), roi: roi.toFixed(1) };
   }, [budget, selectedNumbers.length]);
-
-  // --- [결과 다운로드 (CSV 파일 생성)] ---
-  const handleDownload = () => {
-    if (generatedCombinations.length === 0) return;
-    
-    const nextDraw = latestDrawNo + 1;
-    let content = `[제${nextDraw}회차] LOTTO-MATH 조합 결과\n\n`;
-    content += "게임,번호1,번호2,번호3,번호4,번호5,번호6\n";
-    generatedCombinations.forEach((combo, idx) => {
-      content += `${idx + 1},${combo.join(',')}\n`;
-    });
-    
-    // Excel 한글 깨짐 방지를 위한 UTF-8 BOM 추가
-    const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), content], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `LOTTO-MATH_제${nextDraw}회차_조합결과.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  // --- [결과 기기로 전송 (클립보드 복사)] ---
-  const handleSend = () => {
-    if (generatedCombinations.length === 0) return;
-    setIsSending(true);
-    
-    const nextDraw = latestDrawNo + 1;
-    
-    setTimeout(() => {
-      setIsSending(false);
-      setSendSuccess(true);
-      
-      const textContent = `[제${nextDraw}회차] LOTTO-MATH 추천 조합\n\n` + 
-        generatedCombinations.map((c, i) => `[${i+1}게임] ${c.join(', ')}`).join('\n');
-      
-      const textArea = document.createElement("textarea");
-      textArea.value = textContent;
-      document.body.appendChild(textArea);
-      textArea.select();
-      try {
-        document.execCommand('copy');
-      } catch (err) {
-        console.warn('클립보드 복사 실패', err);
-      }
-      document.body.removeChild(textArea);
-
-      // 3초 후 복사 완료 UI 초기화
-      setTimeout(() => setSendSuccess(false), 3000);
-    }, 1000);
-  };
 
   return (
     <div className="min-h-screen bg-[#05050A] text-slate-300 font-sans selection:bg-cyan-500/30 overflow-x-hidden pb-20">
@@ -358,6 +395,27 @@ export default function LottoMathPlatformV3() {
                   </button>
                 </div>
 
+                {/* 단기 모멘텀 옵션 스위치 */}
+                <div className="flex items-center justify-between p-4 rounded-xl bg-cyan-950/20 border border-cyan-500/10 mb-6">
+                  <div className="flex flex-col pr-4">
+                    <span className="text-sm font-semibold text-white flex items-center gap-2">
+                      ⚡ 단기 모멘텀 가중치 적용 (최근 20회차)
+                    </span>
+                    <span className="text-xs text-gray-400 mt-1 leading-relaxed">
+                      전체 누적이 아닌 최근 기계의 컨디션(최근 20회차)에서 강하게 출현하는 번호에 높은 가중치를 부여합니다.
+                    </span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer select-none">
+                    <input 
+                      type="checkbox" 
+                      checked={useMomentum} 
+                      onChange={(e) => setUseMomentum(e.target.checked)} 
+                      className="sr-only peer" 
+                    />
+                    <div className="w-11 h-6 bg-gray-800 border border-white/10 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-400 after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500 peer-checked:after:bg-white shadow-inner"></div>
+                  </label>
+                </div>
+
                 {/* 선택률 프로그레스 바 */}
                 <div className="mb-8">
                   <div className="flex justify-between text-sm mb-2">
@@ -376,24 +434,14 @@ export default function LottoMathPlatformV3() {
 
                 {/* 1~45 로또 번호 그리드 */}
                 <div className="grid grid-cols-7 sm:grid-cols-9 gap-2 md:gap-3">
-                  {Array.from({ length: 45 }, (_, i) => i + 1).map(num => {
-                    const isSelected = selectedNumbers.includes(num);
-                    return (
-                      <button
-                        key={num}
-                        id={`lotto-num-${num}`}
-                        onClick={() => toggleNumber(num)}
-                        className={`
-                          relative aspect-square rounded-lg flex items-center justify-center text-sm md:text-base font-bold transition-all duration-300
-                          ${isSelected 
-                            ? 'bg-gradient-to-br from-cyan-400 to-blue-600 text-white shadow-[0_0_15px_rgba(34,211,238,0.6)] scale-105 z-10 border-none' 
-                            : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white border border-white/5'}
-                        `}
-                      >
-                        {num}
-                      </button>
-                    );
-                  })}
+                  {numberList.map((num) => (
+                    <NumberButton
+                      key={num}
+                      num={num}
+                      isSelected={selectedNumbers.includes(num)}
+                      onToggle={toggleNumber}
+                    />
+                  ))}
                 </div>
               </GlassCard>
 
